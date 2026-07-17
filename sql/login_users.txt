@@ -1,0 +1,86 @@
+CREATE OR REPLACE FUNCTION login_user(
+    p_user_name VARCHAR(255),
+    p_password VARCHAR(255)
+)
+RETURNS TABLE(
+    user_id UUID,
+    user_name VARCHAR(255),
+    email VARCHAR(255),
+    is_active BOOLEAN,
+    role_name VARCHAR(50)
+)
+LANGUAGE plpgsql
+AS
+$$
+BEGIN
+    ------------------------------------------------------------------
+    -- Validate required inputs
+    ------------------------------------------------------------------
+    IF trim(coalesce(p_user_name, '')) = '' THEN
+        RAISE EXCEPTION 'Username is required';
+    END IF;
+
+    IF trim(coalesce(p_password, '')) = '' THEN
+        RAISE EXCEPTION 'Password is required';
+    END IF;
+
+    ------------------------------------------------------------------
+    -- Verify username, password and active account
+    ------------------------------------------------------------------
+    RETURN QUERY
+    SELECT
+        u.user_id,
+        u.user_name,
+        u.email,
+        u.is_active,
+        r.role_name
+    FROM users u
+    INNER JOIN user_roles ur
+        ON ur.user_id = u.user_id
+    INNER JOIN roles r
+        ON r.role_id = ur.role_id
+    WHERE u.user_name = p_user_name
+      AND u.password_hash = crypt(p_password, u.password_hash)
+      AND u.is_active = TRUE;
+
+    ------------------------------------------------------------------
+    -- If no rows were returned, determine the reason
+    ------------------------------------------------------------------
+    IF NOT FOUND THEN
+
+        -- Username doesn't exist
+        IF NOT EXISTS (
+            SELECT 1
+            FROM users
+            WHERE user_name = p_user_name
+        ) THEN
+            RAISE EXCEPTION 'Invalid username';
+
+        END IF;
+
+        -- Account exists but is inactive
+        IF EXISTS (
+            SELECT 1
+            FROM users
+            WHERE user_name = p_user_name
+              AND is_active = FALSE
+        ) THEN
+            RAISE EXCEPTION 'User account is inactive';
+
+        END IF;
+
+        -- Username exists, therefore password is incorrect
+        RAISE EXCEPTION 'Invalid password';
+
+    END IF;
+
+EXCEPTION
+
+    ------------------------------------------------------------------
+    -- Unexpected error
+    ------------------------------------------------------------------
+    WHEN OTHERS THEN
+        RAISE;
+
+END;
+$$;

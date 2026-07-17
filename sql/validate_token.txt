@@ -1,0 +1,116 @@
+CREATE OR REPLACE FUNCTION validate_token(
+    p_token TEXT
+)
+RETURNS TABLE(
+    user_id UUID,
+    user_name VARCHAR(255),
+    email VARCHAR(255),
+    is_active BOOLEAN,
+    role_name VARCHAR(50),
+    token_expires_at TIMESTAMP
+)
+LANGUAGE plpgsql
+AS
+$$
+BEGIN
+    ------------------------------------------------------------------
+    -- Validate required input
+    ------------------------------------------------------------------
+    IF trim(coalesce(p_token, '')) = '' THEN
+        RAISE EXCEPTION 'Token is required';
+    END IF;
+
+    ------------------------------------------------------------------
+    -- Validate token and return user information
+    ------------------------------------------------------------------
+    RETURN QUERY
+    SELECT
+        u.user_id,
+        u.user_name,
+        u.email,
+        u.is_active,
+        r.role_name,
+        at.expires_at
+    FROM auth_tokens at
+    INNER JOIN users u
+        ON u.user_id = at.user_id
+    INNER JOIN user_roles ur
+        ON ur.user_id = u.user_id
+    INNER JOIN roles r
+        ON r.role_id = ur.role_id
+    WHERE at.token = p_token
+      AND at.is_active = TRUE
+      AND at.revoked_at IS NULL
+      AND at.expires_at > CURRENT_TIMESTAMP
+      AND u.is_active = TRUE;
+
+    ------------------------------------------------------------------
+    -- Determine why validation failed
+    ------------------------------------------------------------------
+    IF NOT FOUND THEN
+
+        -- Token doesn't exist
+        IF NOT EXISTS (
+            SELECT 1
+            FROM auth_tokens
+            WHERE token = p_token
+        ) THEN
+            RAISE EXCEPTION 'Invalid token';
+        END IF;
+
+        -- Token has been revoked
+        IF EXISTS (
+            SELECT 1
+            FROM auth_tokens
+            WHERE token = p_token
+              AND revoked_at IS NOT NULL
+        ) THEN
+            RAISE EXCEPTION 'Token has been revoked';
+        END IF;
+
+        -- Token is inactive
+        IF EXISTS (
+            SELECT 1
+            FROM auth_tokens
+            WHERE token = p_token
+              AND is_active = FALSE
+        ) THEN
+            RAISE EXCEPTION 'Token is inactive';
+        END IF;
+
+        -- Token has expired
+        IF EXISTS (
+            SELECT 1
+            FROM auth_tokens
+            WHERE token = p_token
+              AND expires_at <= CURRENT_TIMESTAMP
+        ) THEN
+            RAISE EXCEPTION 'Token has expired';
+        END IF;
+
+        -- User account is inactive
+        IF EXISTS (
+            SELECT 1
+            FROM auth_tokens at
+            INNER JOIN users u
+                ON u.user_id = at.user_id
+            WHERE at.token = p_token
+              AND u.is_active = FALSE
+        ) THEN
+            RAISE EXCEPTION 'User account is inactive';
+        END IF;
+
+        RAISE EXCEPTION 'Token validation failed';
+
+    END IF;
+
+EXCEPTION
+
+    ------------------------------------------------------------------
+    -- Unexpected error
+    ------------------------------------------------------------------
+    WHEN OTHERS THEN
+        RAISE;
+
+END;
+$$;

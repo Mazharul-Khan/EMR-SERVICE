@@ -1,0 +1,136 @@
+CREATE OR REPLACE FUNCTION signup_user(
+    p_user_name VARCHAR(255),
+    p_email VARCHAR(255),
+    p_password VARCHAR(255),
+    p_role_name VARCHAR(50)
+)
+RETURNS TABLE(
+    user_id UUID,
+    user_name VARCHAR(255),
+    email VARCHAR(255),
+    is_active BOOLEAN,
+    role_name VARCHAR(50)
+)
+LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    v_user_id UUID;
+    v_password_hash VARCHAR(255);
+    v_role_id INTEGER;
+    v_constraint_name TEXT;
+BEGIN
+    ------------------------------------------------------------------
+    -- Validate required inputs
+    ------------------------------------------------------------------
+    IF trim(coalesce(p_user_name, '')) = '' THEN
+        RAISE EXCEPTION 'Username is required';
+    END IF;
+
+    IF trim(coalesce(p_email, '')) = '' THEN
+        RAISE EXCEPTION 'Email is required';
+    END IF;
+
+    IF trim(coalesce(p_password, '')) = '' THEN
+        RAISE EXCEPTION 'Password is required';
+    END IF;
+
+    IF trim(coalesce(p_role_name, '')) = '' THEN
+        RAISE EXCEPTION 'Role is required';
+    END IF;
+
+    ------------------------------------------------------------------
+    -- Validate role (Fixed: Added table alias 'r.')
+    ------------------------------------------------------------------
+    SELECT r.role_id
+    INTO v_role_id
+    FROM roles r
+    WHERE r.role_name = p_role_name;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Role "%" does not exist.', p_role_name;
+    END IF;
+
+    ------------------------------------------------------------------
+    -- Hash password
+    ------------------------------------------------------------------
+    v_password_hash := crypt(p_password, gen_salt('bf', 10));
+
+    ------------------------------------------------------------------
+    -- Create user
+    ------------------------------------------------------------------
+    INSERT INTO users (
+        user_id,
+        user_name,
+        email,
+        password_hash,
+        is_active,
+        created_at,
+        updated_at
+    )
+    VALUES (
+        gen_random_uuid(),
+        p_user_name,
+        p_email,
+        v_password_hash,
+        TRUE,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+    )
+    RETURNING users.user_id
+    INTO v_user_id;
+
+    ------------------------------------------------------------------
+    -- Assign role
+    ------------------------------------------------------------------
+    INSERT INTO user_roles (
+        user_id,
+        role_id
+    )
+    VALUES (
+        v_user_id,
+        v_role_id
+    );
+
+    ------------------------------------------------------------------
+    -- Return created user (Fixed: Using column positioning for safety)
+    ------------------------------------------------------------------
+    RETURN QUERY
+    SELECT
+        u.user_id,
+        u.user_name,
+        u.email,
+        u.is_active,
+        r.role_name
+    FROM users u
+    JOIN user_roles ur ON ur.user_id = u.user_id
+    JOIN roles r ON r.role_id = ur.role_id
+    WHERE u.user_id = v_user_id;
+
+EXCEPTION
+    ------------------------------------------------------------------
+    -- Handle duplicate username/email
+    ------------------------------------------------------------------
+    WHEN unique_violation THEN
+
+        GET STACKED DIAGNOSTICS
+            v_constraint_name = CONSTRAINT_NAME;
+
+        IF v_constraint_name = 'users_user_name_key' THEN
+            RAISE EXCEPTION 'Username already exists';
+
+        ELSIF v_constraint_name = 'users_email_key' THEN
+            RAISE EXCEPTION 'Email already exists';
+
+        ELSE
+            RAISE;
+        END IF;
+
+    ------------------------------------------------------------------
+    -- Handle foreign key violations
+    ------------------------------------------------------------------
+    WHEN foreign_key_violation THEN
+        RAISE EXCEPTION 'Invalid role assignment';
+
+END;
+$$;

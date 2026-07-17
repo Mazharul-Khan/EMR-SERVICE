@@ -1,0 +1,109 @@
+CREATE OR REPLACE FUNCTION save_auth_token(
+    p_user_id UUID,
+    p_token TEXT
+)
+RETURNS TABLE(
+    token_id UUID,
+    user_id UUID,        -- This is what causes the clash with table columns
+    token TEXT,
+    expires_at TIMESTAMP,
+    is_active BOOLEAN
+)
+LANGUAGE plpgsql
+AS
+$$
+#variable_conflict use_column  -- <--- ADD THIS LINE HERE
+DECLARE
+    v_token_id UUID;
+BEGIN
+    ------------------------------------------------------------------
+    -- Validate required inputs
+    ------------------------------------------------------------------
+    IF p_user_id IS NULL THEN
+        RAISE EXCEPTION 'User ID is required';
+    END IF;
+
+    IF trim(coalesce(p_token, '')) = '' THEN
+        RAISE EXCEPTION 'Token is required';
+    END IF;
+
+    ------------------------------------------------------------------
+    -- Verify user exists
+    ------------------------------------------------------------------
+    IF NOT EXISTS (
+        SELECT 1
+        FROM users u                 -- Added alias 'u' for extra safety
+        WHERE u.user_id = p_user_id  -- Explicitly using u.user_id
+    ) THEN
+        RAISE EXCEPTION 'User does not exist';
+    END IF;
+
+    ------------------------------------------------------------------
+    -- Revoke any currently active tokens
+    ------------------------------------------------------------------
+    UPDATE auth_tokens
+    SET
+        is_active = FALSE,
+        revoked_at = CURRENT_TIMESTAMP
+    WHERE auth_tokens.user_id = p_user_id -- Explicitly using table name prefix
+      AND auth_tokens.is_active = TRUE;
+
+    ------------------------------------------------------------------
+    -- Save the new token
+    ------------------------------------------------------------------
+    INSERT INTO auth_tokens (
+        token_id,
+        user_id,
+        token,
+        expires_at,
+        created_at,
+        revoked_at,
+        is_active
+    )
+    VALUES (
+        gen_random_uuid(),
+        p_user_id,
+        p_token,
+        CURRENT_TIMESTAMP + INTERVAL '30 days',
+        CURRENT_TIMESTAMP,
+        NULL,
+        TRUE
+    )
+    RETURNING auth_tokens.token_id
+    INTO v_token_id;
+
+    ------------------------------------------------------------------
+    -- Return the saved token
+    ------------------------------------------------------------------
+    RETURN QUERY
+    SELECT
+        at.token_id,
+        at.user_id,
+        at.token,
+        at.expires_at,
+        at.is_active
+    FROM auth_tokens at
+    WHERE at.token_id = v_token_id;
+
+EXCEPTION
+
+    ------------------------------------------------------------------
+    -- Duplicate token
+    ------------------------------------------------------------------
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'Token already exists';
+
+    ------------------------------------------------------------------
+    -- Foreign key violation
+    ------------------------------------------------------------------
+    WHEN foreign_key_violation THEN
+        RAISE EXCEPTION 'Invalid user';
+
+    ------------------------------------------------------------------
+    -- Unexpected error
+    ------------------------------------------------------------------
+    WHEN OTHERS THEN
+        RAISE;
+
+END;
+$$;
